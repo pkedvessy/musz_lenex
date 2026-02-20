@@ -39,5 +39,20 @@ pipeline {
                 }
             }
         }
+
+        stage('Fetch & Import LENEX') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD')]) {
+                    sh """
+                    docker run --rm -v \$(pwd)/scripts:/scripts \
+                        -e DB_HOST=${DB_HOST} -e DB_PORT=${DB_PORT} \
+                        -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
+                        -e DB_PASSWORD=$DB_PASSWORD \
+                        python:3.12-slim \
+                        bash -c "pip install psycopg2-binary requests beautifulsoup4 && python /scripts/fetch_lenex.py"
+                    """
+                }
+            }
+        }
     }
 }
