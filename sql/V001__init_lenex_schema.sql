@@ -7,9 +7,7 @@
 -- ATHLETE
 -- =====================
 CREATE TABLE lx_athlete (
-    id BIGSERIAL PRIMARY KEY,
-    identityhash CHAR(64) NOT NULL UNIQUE,
-    lenexathleteid VARCHAR(64),
+    id BIGINT PRIMARY KEY,
     firstname VARCHAR(128),
     lastname VARCHAR(128),
     birthdate DATE,
@@ -34,8 +32,7 @@ ON lx_club(lenexclubcode);
 -- MEET
 -- =====================
 CREATE TABLE lx_meet (
-    id BIGSERIAL PRIMARY KEY,
-    lenexmeetid VARCHAR(64),
+    id BIGINT PRIMARY KEY,
     name VARCHAR(255),
     startdate DATE,
     enddate DATE,
@@ -194,15 +191,15 @@ ON lx_athleteclubaffiliation(athleteid, validfrom);
 -- IMPORTED FILE TRACKING
 -- =====================
 CREATE TABLE importedlenexfile (
-    eventid BIGINT PRIMARY KEY,
+    onlineeventid BIGINT PRIMARY KEY,
     eventname VARCHAR(255) NULL,
     eventdatefrom DATE NULL,
     eventdateto DATE NULL,
     filename VARCHAR(255) NULL,
     url VARCHAR(511) NULL,
     createdat TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    lenex_not_found BOOLEAN DEFAULT FALSE,
-    downloaded BOOLEAN DEFAULT FALSE,
-    gdrive_uploaded BOOLEAN DEFAULT FALSE,
-    processed BOOLEAN DEFAULT FALSE
+    status VARCHAR(32) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'lenex_not_found', 'downloaded', 'backed_up', 'processed', 'processing_failed'))
 );
+
+COMMENT ON COLUMN importedlenexfile.status IS 'pending=awaiting fetch, lenex_not_found=no file, downloaded=on disk, backed_up=on gdrive, processed=imported to lx_*, processing_failed=import failed';

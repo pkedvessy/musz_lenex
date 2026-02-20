@@ -64,7 +64,7 @@ try:
     cur.execute("""
         SELECT filename
         FROM importedlenexfile
-        WHERE filename IS NOT NULL AND gdrive_uploaded IS DISTINCT FROM TRUE
+        WHERE filename IS NOT NULL AND status = 'downloaded'
     """)
     files = cur.fetchall()
     print(f"[INFO] {len(files)} files to upload", flush=True)
@@ -106,7 +106,7 @@ for row in files:
 
         cur.execute("""
             UPDATE importedlenexfile
-            SET gdrive_uploaded = TRUE
+            SET status = 'backed_up'
             WHERE filename = %s
         """, (fname,))
         conn.commit()

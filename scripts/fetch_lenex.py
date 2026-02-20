@@ -109,9 +109,9 @@ for ev in events:
     event_dateto = ev.get('dateto')
     try:
         cur.execute(
-            """INSERT INTO importedlenexfile(eventid, eventname, eventdatefrom, eventdateto)
+            """INSERT INTO importedlenexfile(onlineeventid, eventname, eventdatefrom, eventdateto)
                VALUES (%s,%s,%s,%s)
-               ON CONFLICT (eventid) DO UPDATE SET
+               ON CONFLICT (onlineeventid) DO UPDATE SET
                  eventname = EXCLUDED.eventname,
                  eventdatefrom = EXCLUDED.eventdatefrom,
                  eventdateto = EXCLUDED.eventdateto""",
@@ -123,12 +123,12 @@ for ev in events:
         conn.rollback()
 
 # -----------------------------
-# Phase 2: Lookup events from DB where not downloaded and lenex_not_found not set
+# Phase 2: Lookup events from DB where status is pending (needs fetch)
 # -----------------------------
 cur.execute(
-    """SELECT eventid, eventname FROM importedlenexfile
-       WHERE downloaded IS NOT TRUE AND (lenex_not_found IS NOT TRUE)
-       ORDER BY eventid"""
+    """SELECT onlineeventid, eventname FROM importedlenexfile
+       WHERE status = 'pending'
+       ORDER BY onlineeventid"""
 )
 pending = cur.fetchall()
 print(f"[INFO] Found {len(pending)} events pending download", flush=True)
@@ -136,48 +136,48 @@ print(f"[INFO] Found {len(pending)} events pending download", flush=True)
 # -----------------------------
 # Phase 3: Process pending events
 # -----------------------------
-for event_id, event_name in pending:
-    event_name = event_name or event_id
-    file_name = f"event_{event_id}.lef"
+for onlineeventid, event_name in pending:
+    event_name = event_name or onlineeventid
+    file_name = f"event_{onlineeventid}.lef"
     file_path = os.path.join(DOWNLOAD_DIR, file_name)
 
-    print(f"[EVENT] Processing {event_name} ({event_id})", flush=True)
+    print(f"[EVENT] Processing {event_name} ({onlineeventid})", flush=True)
 
     if os.path.exists(file_path):
         print(f"[SKIP] {file_name} already exists, skipping fetch and download", flush=True)
         try:
             cur.execute(
-                "UPDATE importedlenexfile SET filename=%s, downloaded=TRUE WHERE eventid=%s",
-                (file_name, event_id)
+                "UPDATE importedlenexfile SET filename=%s, status='downloaded' WHERE onlineeventid=%s",
+                (file_name, onlineeventid)
             )
             conn.commit()
-            print(f"[IMPORTED] {file_name} ({event_name})", flush=True)
+            print(f"[DOWNLOADED] {file_name} ({event_name})", flush=True)
         except Exception as e:
             print(f"[ERROR] Cannot update {event_id}: {e}", flush=True)
             conn.rollback()
         continue
 
-    event_url = f"{BASE_URL}/event/program?OnlineEventId={event_id}"
+    event_url = f"{BASE_URL}/event/program?OnlineEventId={onlineeventid}"
 
     try:
         r = requests.get(event_url)
         r.raise_for_status()
-        print(f"[HTTP] Fetched event page for {event_id}", flush=True)
+        print(f"[HTTP] Fetched event page for {onlineeventid}", flush=True)
     except Exception as e:
-        print(f"[ERROR] Cannot fetch event page for {event_id}: {e}", flush=True)
+        print(f"[ERROR] Cannot fetch event page for {onlineeventid}: {e}", flush=True)
         continue
 
-    lenex_url = get_lenex_file_url(r.text, event_id)
+    lenex_url = get_lenex_file_url(r.text, onlineeventid)
     if not lenex_url:
-        print(f"[SKIP] No LENEX file found for {event_name} ({event_id})", flush=True)
+        print(f"[SKIP] No LENEX file found for {event_name} ({onlineeventid})", flush=True)
         try:
             cur.execute(
-                "UPDATE importedlenexfile SET lenex_not_found=TRUE WHERE eventid=%s",
-                (event_id,)
+                "UPDATE importedlenexfile SET status='lenex_not_found' WHERE onlineeventid=%s",
+                (onlineeventid,)
             )
             conn.commit()
         except Exception as e:
-            print(f"[ERROR] Cannot update lenex_not_found for {event_id}: {e}", flush=True)
+            print(f"[ERROR] Cannot update status for {onlineeventid}: {e}", flush=True)
             conn.rollback()
         continue
 
@@ -195,18 +195,18 @@ for event_id, event_name in pending:
                 os.remove(temp_path)
             except OSError:
                 pass
-        print(f"[ERROR] Cannot download LENEX file for {event_id}: {e}", flush=True)
+        print(f"[ERROR] Cannot download LENEX file for {onlineeventid}: {e}", flush=True)
         continue
 
     try:
         cur.execute(
-            "UPDATE importedlenexfile SET filename=%s, url=%s, downloaded=TRUE WHERE eventid=%s",
-            (file_name, lenex_url, event_id)
+            "UPDATE importedlenexfile SET filename=%s, url=%s, status='downloaded' WHERE onlineeventid=%s",
+            (file_name, lenex_url, onlineeventid)
         )
         conn.commit()
-        print(f"[IMPORTED] {file_name} ({event_name})", flush=True)
+        print(f"[DOWNLOADED] {file_name} ({event_name})", flush=True)
     except Exception as e:
-        print(f"[ERROR] Cannot update downloaded status for {event_id}: {e}", flush=True)
+        print(f"[ERROR] Cannot update status for {onlineeventid}: {e}", flush=True)
         conn.rollback()
 
 cur.close()

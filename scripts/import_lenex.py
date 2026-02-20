@@ -6,10 +6,9 @@ LENEX is an XML-based swimming data format. Structure:
   LENEX -> MEETS -> MEET -> SESSIONS -> SESSION -> EVENTS -> EVENT -> SWIMSTYLE, HEATS -> HEAT
         -> CLUBS -> CLUB -> ATHLETES -> ATHLETE -> RESULTS -> RESULT -> SPLITS -> SPLIT
 
-Processes files from importedlenexfile where downloaded=TRUE and processed=FALSE.
+Processes files from importedlenexfile where status is downloaded or backed_up.
 """
 import os
-import hashlib
 from datetime import date, datetime
 import xml.etree.ElementTree as ET
 import psycopg2
@@ -62,15 +61,6 @@ def _parse_swimtime(swimtime: str) -> int | None:
         return None
 
 
-def _athlete_identity_hash(firstname: str, lastname: str, birthdate_str: str) -> str:
-    """Create stable hash for athlete identity (deduplication)."""
-    fn = (firstname or '').strip().lower()
-    ln = (lastname or '').strip().lower()
-    bd = (birthdate_str or '').strip()
-    raw = f"{fn}|{ln}|{bd}"
-    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
-
-
 def _parse_date(s: str) -> date | None:
     if not s:
         return None
@@ -82,8 +72,18 @@ def _parse_date(s: str) -> date | None:
     return None
 
 
-def import_lenex_file(cur, conn, filepath: str, eventid: int) -> bool:
+def import_lenex_file(cur, conn, filepath: str, onlineeventid) -> bool:
     """Parse LENEX XML and import into DB. Returns True on success."""
+    # onlineeventid (meet id) must be parseable as integer
+    if onlineeventid is None:
+        raise ValueError(f"Meet onlineeventid is missing (file: {filepath})")
+    try:
+        meet_id = int(onlineeventid)
+    except (ValueError, TypeError) as e:
+        raise ValueError(
+            f"Meet onlineeventid must be numeric, got {onlineeventid!r} (file: {filepath})"
+        ) from e
+
     try:
         tree = ET.parse(filepath)
     except ET.ParseError as e:
@@ -112,12 +112,13 @@ def import_lenex_file(cur, conn, filepath: str, eventid: int) -> bool:
 
     # --- Meet ---
     cur.execute(
-        """INSERT INTO lx_meet(lenexmeetid, name, startdate, enddate, course)
+        """INSERT INTO lx_meet(id, name, startdate, enddate, course)
            VALUES (%s,%s,NULL,NULL,%s)
-           RETURNING id""",
-        (str(eventid), meet_name, meet_course)
+           ON CONFLICT (id) DO UPDATE SET
+             name = COALESCE(EXCLUDED.name, lx_meet.name),
+             course = COALESCE(EXCLUDED.course, lx_meet.course)""",
+        (meet_id, meet_name, meet_course)
     )
-    meet_id = cur.fetchone()[0]
     conn.commit()
 
     # Maps for LENEX ids -> our DB ids
@@ -190,7 +191,6 @@ def import_lenex_file(cur, conn, filepath: str, eventid: int) -> bool:
         return True
 
     club_code_to_id = {}
-    athlete_hash_to_id = {}
 
     for club_elem in clubs_elem.findall('CLUB'):
         club_code = _attr(club_elem, 'code') or _attr(club_elem, 'name', '')[:32]
@@ -222,22 +222,32 @@ def import_lenex_file(cur, conn, filepath: str, eventid: int) -> bool:
             birth = _parse_date(birthdate_s)
             gender = (_attr(athlete_elem, 'gender') or 'X')[:1].upper()
 
-            identity_hash = _athlete_identity_hash(firstname, lastname, birthdate_s or '')
+            # athleteid must be parseable as integer
+            if not ath_id:
+                raise ValueError(
+                    f"Athlete missing athleteid: firstname={firstname!r}, lastname={lastname!r}, "
+                    f"birthdate={birthdate_s!r} (file: {filepath})"
+                )
+            try:
+                athlete_id = int(ath_id)
+            except (ValueError, TypeError) as e:
+                raise ValueError(
+                    f"Athlete athleteid must be numeric, got {ath_id!r} for "
+                    f"firstname={firstname!r}, lastname={lastname!r} (file: {filepath})"
+                ) from e
 
             cur.execute(
-                """INSERT INTO lx_athlete(identityhash, lenexathleteid, firstname, lastname, birthdate, gender)
-                   VALUES (%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT (identityhash) DO UPDATE SET
-                     lenexathleteid = COALESCE(EXCLUDED.lenexathleteid, lx_athlete.lenexathleteid),
+                """INSERT INTO lx_athlete(id, firstname, lastname, birthdate, gender)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (id) DO UPDATE SET
                      firstname = COALESCE(EXCLUDED.firstname, lx_athlete.firstname),
                      lastname = COALESCE(EXCLUDED.lastname, lx_athlete.lastname),
                      birthdate = COALESCE(EXCLUDED.birthdate, lx_athlete.birthdate),
                      gender = COALESCE(EXCLUDED.gender, lx_athlete.gender)
                    RETURNING id""",
-                (identity_hash, ath_id, firstname, lastname, birth, gender)
+                (athlete_id, firstname, lastname, birth, gender)
             )
             athlete_id = cur.fetchone()[0]
-            athlete_hash_to_id[identity_hash] = athlete_id
 
             # Club affiliation at this meet
             if club_id and meet_id:
@@ -314,26 +324,40 @@ def main():
         sys.exit(1)
 
     cur.execute("""
-        SELECT eventid, filename FROM importedlenexfile
-        WHERE downloaded = TRUE AND processed = FALSE AND filename IS NOT NULL
+        SELECT onlineeventid, filename FROM importedlenexfile
+        WHERE status IN ('downloaded', 'backed_up') AND filename IS NOT NULL
         ORDER BY eventdatefrom
     """)
     rows = cur.fetchall()
     print(f"[INFO] {len(rows)} files to process", flush=True)
 
-    for eventid, filename in rows:
+    for onlineeventid, filename in rows:
         filepath = os.path.join(DOWNLOAD_DIR, filename)
         if not os.path.isfile(filepath):
             print(f"[WARN] File not found: {filepath}", flush=True)
             continue
 
-        print(f"[IMPORT] Processing {filename} (event {eventid})", flush=True)
-        if import_lenex_file(cur, conn, filepath, eventid):
-            cur.execute("UPDATE importedlenexfile SET processed = TRUE WHERE eventid = %s", (eventid,))
+        print(f"[IMPORT] Processing {filename} (event {onlineeventid})", flush=True)
+        try:
+            if import_lenex_file(cur, conn, filepath, onlineeventid):
+                cur.execute("UPDATE importedlenexfile SET status = 'processed' WHERE onlineeventid = %s", (onlineeventid,))
+                conn.commit()
+                print(f"[OK] Imported {filename}", flush=True)
+            else:
+                cur.execute("UPDATE importedlenexfile SET status = 'processing_failed' WHERE onlineeventid = %s", (onlineeventid,))
+                conn.commit()
+                print(f"[ERROR] Failed to import {filename}", flush=True)
+        except ValueError as e:
+            cur.execute("UPDATE importedlenexfile SET status = 'processing_failed' WHERE onlineeventid = %s", (onlineeventid,))
             conn.commit()
-            print(f"[OK] Imported {filename}", flush=True)
-        else:
-            print(f"[ERROR] Failed to import {filename}", flush=True)
+            print(f"[ERROR] Import failed for {filename}: {e}", flush=True)
+        except Exception as e:
+            try:
+                cur.execute("UPDATE importedlenexfile SET status = 'processing_failed' WHERE onlineeventid = %s", (onlineeventid,))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            print(f"[ERROR] Failed to import {filename}: {e}", flush=True)
 
     cur.close()
     conn.close()
