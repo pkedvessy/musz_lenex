@@ -197,5 +197,8 @@ CREATE TABLE importedlenexfile (
     id BIGSERIAL PRIMARY KEY,
     filename VARCHAR(255),
     filehash CHAR(64) NOT NULL UNIQUE,
-    importedat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    url VARCHAR(511),
+    importedat TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    uploaded_to_drive BOOLEAN DEFAULT FALSE,
+    processed BOOLEAN DEFAULT FALSE
 );
