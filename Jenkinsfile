@@ -44,7 +44,9 @@ pipeline {
             steps {
                 withCredentials([usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD')]) {
                     sh """
-                    docker run --rm -i -v \$(pwd)/scripts:/scripts \
+                    docker run --rm -i \
+                        -v \$(pwd)/scripts:/scripts \
+                        -v \$(pwd)/lenex_files:/lenex_files \
                         -e DB_HOST=${DB_HOST} -e DB_PORT=${DB_PORT} \
                         -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
                         -e DB_PASSWORD=$DB_PASSWORD \
@@ -59,16 +61,37 @@ pipeline {
             steps {
                 withCredentials([
                     usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD'),
-                    file(credentialsId: 'gdrive-service-account', variable: 'GDRIVE_JSON')
+                    file(credentialsId: 'gdrive-oauth-token', variable: 'GDRIVE_TOKEN')
                 ]) {
                     sh """
-                    docker run --rm -i -v \$(pwd)/scripts:/scripts -v $GDRIVE_JSON:/secrets/gdrive.json \
+                    docker run --rm -i \
+                        -v \$(pwd)/scripts:/scripts \
+                        -v \$(pwd)/lenex_files:/lenex_files \
+                        -v $GDRIVE_TOKEN:/secrets/token.json \
                         -e DB_HOST=${DB_HOST} -e DB_PORT=${DB_PORT} \
                         -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
                         -e DB_PASSWORD=$DB_PASSWORD \
                         -e GDRIVE_FOLDER_ID=YOUR_FOLDER_ID \
                         python:3.12-slim \
                         bash -c "pip install psycopg2-binary google-api-python-client google-auth-httplib2 google-auth-oauthlib && python -u /scripts/backup_to_gdrive.py"
+                    """
+                }
+            }
+        }
+
+        stage('Import LENEX') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD')]) {
+                    sh """
+                    docker run --rm -i \
+                        -v \$(pwd)/scripts:/scripts \
+                        -v \$(pwd)/lenex_files:/lenex_files \
+                        -e DB_HOST=${DB_HOST} -e DB_PORT=${DB_PORT} \
+                        -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
+                        -e DB_PASSWORD=$DB_PASSWORD \
+                        -e LENEX_DIR=/lenex_files \
+                        python:3.12-slim \
+                        bash -c "pip install psycopg2-binary && python -u /scripts/import_lenex.py"
                     """
                 }
             }

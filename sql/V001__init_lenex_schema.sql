@@ -194,11 +194,15 @@ ON lx_athleteclubaffiliation(athleteid, validfrom);
 -- IMPORTED FILE TRACKING
 -- =====================
 CREATE TABLE importedlenexfile (
-    id BIGSERIAL PRIMARY KEY,
-    filename VARCHAR(255),
-    filehash CHAR(64) NOT NULL UNIQUE,
-    url VARCHAR(511),
-    importedat TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    uploaded_to_drive BOOLEAN DEFAULT FALSE,
+    eventid BIGINT PRIMARY KEY,
+    eventname VARCHAR(255) NULL,
+    eventdatefrom DATE NULL,
+    eventdateto DATE NULL,
+    filename VARCHAR(255) NULL,
+    url VARCHAR(511) NULL,
+    createdat TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    lenex_not_found BOOLEAN DEFAULT FALSE,
+    downloaded BOOLEAN DEFAULT FALSE,
+    gdrive_uploaded BOOLEAN DEFAULT FALSE,
     processed BOOLEAN DEFAULT FALSE
 );
