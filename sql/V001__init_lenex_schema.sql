@@ -36,11 +36,18 @@ CREATE TABLE lx_meet (
     name VARCHAR(255),
     startdate DATE,
     enddate DATE,
-    course VARCHAR(10)
+    course VARCHAR(10),
+    datasource VARCHAR(20) NOT NULL DEFAULT 'lenex'
+        CHECK (datasource IN ('lenex', 'scraped'))
 );
 
 CREATE INDEX ix_lx_meet_date
 ON lx_meet(startdate);
+
+CREATE INDEX ix_lx_meet_datasource
+ON lx_meet(datasource);
+
+COMMENT ON COLUMN lx_meet.datasource IS 'lenex=official LENEX file import, scraped=parsed from MUSZ HTTP pages (may be less reliable)';
 
 -- =====================
 -- SESSION
@@ -199,7 +206,7 @@ CREATE TABLE importedlenexfile (
     url VARCHAR(511) NULL,
     createdat TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     status VARCHAR(32) NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'lenex_not_found', 'downloaded', 'backed_up', 'processed', 'processing_failed'))
+        CHECK (status IN ('pending', 'lenex_not_found', 'downloaded', 'backed_up', 'processed', 'processing_failed', 'scraped', 'scrape_failed'))
 );
 
-COMMENT ON COLUMN importedlenexfile.status IS 'pending=awaiting fetch, lenex_not_found=no file, downloaded=on disk, backed_up=on gdrive, processed=imported to lx_*, processing_failed=import failed';
+COMMENT ON COLUMN importedlenexfile.status IS 'pending=awaiting fetch, lenex_not_found=no file, downloaded=on disk, backed_up=on gdrive, processed=imported from LENEX, processing_failed=import failed, scraped=parsed from MUSZ web pages, scrape_failed=scraper attempted but failed';

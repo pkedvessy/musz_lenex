@@ -75,6 +75,16 @@ except Exception as e:
 # -----------------------------
 # UPLOAD LOOP
 # -----------------------------
+def _file_exists_in_folder(service, name: str, folder_id: str) -> bool:
+    """Check if a file with the given name already exists in the folder."""
+    result = service.files().list(
+        q=f"name = {repr(name)} and '{folder_id}' in parents and trashed = false",
+        fields='files(id)',
+        pageSize=1
+    ).execute()
+    return len(result.get('files', [])) > 0
+
+
 for row in files:
     fname = row[0]
     file_path = os.path.join(DOWNLOAD_DIR, fname)
@@ -82,6 +92,19 @@ for row in files:
     if not os.path.exists(file_path):
         print(f"[WARN] {file_path} does not exist locally, skipping", flush=True)
         continue
+
+    try:
+        if _file_exists_in_folder(service, fname, FOLDER_ID):
+            print(f"[SKIP] {fname} already exists in Drive, marking backed_up", flush=True)
+            cur.execute("""
+                UPDATE importedlenexfile
+                SET status = 'backed_up'
+                WHERE filename = %s
+            """, (fname,))
+            conn.commit()
+            continue
+    except Exception as e:
+        print(f"[WARN] Could not check existing files for {fname}: {e}", flush=True)
 
     print(f"[UPLOAD] Uploading {fname}", flush=True)
 
