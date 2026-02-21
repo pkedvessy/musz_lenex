@@ -169,7 +169,7 @@ for onlineeventid, event_name in pending:
 
     lenex_url = get_lenex_file_url(r.text, onlineeventid)
     if not lenex_url:
-        print(f"[SKIP] No LENEX file found for {event_name} ({onlineeventid})", flush=True)
+        print(f"[INFO] No LENEX file for {event_name} ({onlineeventid}), set status=lenex_not_found", flush=True)
         try:
             cur.execute(
                 "UPDATE importedlenexfile SET status='lenex_not_found' WHERE onlineeventid=%s",

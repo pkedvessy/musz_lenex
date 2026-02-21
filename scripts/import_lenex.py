@@ -112,11 +112,12 @@ def import_lenex_file(cur, conn, filepath: str, onlineeventid) -> bool:
 
     # --- Meet ---
     cur.execute(
-        """INSERT INTO lx_meet(id, name, startdate, enddate, course)
-           VALUES (%s,%s,NULL,NULL,%s)
+        """INSERT INTO lx_meet(id, name, startdate, enddate, course, datasource)
+           VALUES (%s,%s,NULL,NULL,%s,'lenex')
            ON CONFLICT (id) DO UPDATE SET
              name = COALESCE(EXCLUDED.name, lx_meet.name),
-             course = COALESCE(EXCLUDED.course, lx_meet.course)""",
+             course = COALESCE(EXCLUDED.course, lx_meet.course),
+             datasource = EXCLUDED.datasource""",
         (meet_id, meet_name, meet_course)
     )
     conn.commit()
