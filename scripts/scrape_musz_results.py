@@ -144,11 +144,13 @@ def _fetch_swimmer_birthyear(onlineeventid: int, umk: int) -> int | None:
 
 def scrape_and_import(onlineeventid: int) -> bool:
     """Scrape MUSZ pages and import into lx_* tables. Returns True on success."""
+    print(f"[SCRAPE] Starting for onlineeventid={onlineeventid}", flush=True)
     meet_id = int(onlineeventid)
     conn = psycopg2.connect(
         host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD
     )
     cur = conn.cursor()
+    print(f"[SCRAPE] DB connected, fetching eventdata...", flush=True)
 
     # 1. Fetch eventdata for meet info
     eventdata_url = f"{BASE_URL}/event/eventdata?OnlineEventId={onlineeventid}"
