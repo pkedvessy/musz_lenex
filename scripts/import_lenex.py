@@ -284,12 +284,18 @@ def import_lenex_file(cur, conn, filepath: str, onlineeventid) -> bool:
                 rank_s = _attr(res, 'place') or _attr(res, 'rank')
                 rank = int(rank_s) if rank_s and rank_s.isdigit() else None
                 react_s = _attr(res, 'reactiontime')
-                reactiontime = _parse_swimtime(react_s) if react_s else None
+                # LENEX reactiontime e.g. "+01.94" -> 194 hundredths
+                reactiontime_hund = _parse_swimtime(react_s.lstrip('+') if react_s else '') if react_s else None
+                points_s = _attr(res, 'points')
+                try:
+                    finapoints = int(float(points_s)) if points_s else None
+                except (ValueError, TypeError):
+                    finapoints = None
 
                 cur.execute(
-                    """INSERT INTO lx_result(athleteid, eventid, heatnumber, clubid, lane, timehundredths, status, rank, reactiontime)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-                    (athlete_id, lx_event_id, heatnumber, club_id, lane, time_hund, status or None, rank, reactiontime)
+                    """INSERT INTO lx_result(athleteid, eventid, heatnumber, clubid, lane, timehundredths, status, rank, reactiontimehundredths, finapoints)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (athlete_id, lx_event_id, heatnumber, club_id, lane, time_hund, status or None, rank, reactiontime_hund, finapoints)
                 )
                 result_id = cur.fetchone()[0]
 

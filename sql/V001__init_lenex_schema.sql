@@ -93,7 +93,8 @@ CREATE TABLE lx_result (
     timehundredths INT,
     status VARCHAR(10),
     rank INT,
-    reactiontime INT
+    reactiontimehundredths INT,
+    finapoints INT
 );
 
 CREATE INDEX ix_lx_result_athlete

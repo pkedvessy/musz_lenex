@@ -295,29 +295,44 @@ def scrape_and_import(onlineeventid: int) -> None:
                 print(f"[SCRAPE] ERROR: summary fetch failed for event {event_id}: {e}", flush=True)
                 continue
             soup_sum = BeautifulSoup(r_sum.text, 'html.parser')
+            def _href_matches_event(href: str) -> bool:
+                qs = parse_qs(urlparse(href.replace('&amp;', '&')).query)
+                eid = qs.get('EventId', [None])[0]
+                return eid == str(event_id)
+
             for a in soup_sum.find_all('a', href=True):
                 href = a['href'].replace('&amp;', '&')
-                if 'event/summary' in href and f'EventId={event_id}' in href:
+                if 'event/summary' in href and 'SessionId=' in href and _href_matches_event(href):
                     qs = parse_qs(urlparse(href).query)
                     cid = qs.get('CategoryId', [None])[0]
                     if cid is not None and str(cid).isdigit():
                         category_ids.add(int(cid))
             for a in soup.find_all('a', href=True):  # program page
                 href = a['href'].replace('&amp;', '&')
-                if 'event/summary' in href and f'EventId={event_id}' in href:
+                if 'event/summary' in href and 'SessionId=' in href and _href_matches_event(href):
                     qs = parse_qs(urlparse(href).query)
                     cid = qs.get('CategoryId', [None])[0]
                     if cid is not None and str(cid).isdigit():
                         category_ids.add(int(cid))
-            # Only fetch explicit CategoryIds when multiple categories exist (2+)
-            # Single-category events: default view is sufficient, extra fetch would duplicate
-            if len(category_ids) >= 2:
-                for cid in range(min(category_ids), max(category_ids) + 1):
-                    category_ids.add(cid)
 
-            # Always include categoryless URL (initial response); add explicit category URLs when 2+
-            fetch_for_category = {None: soup_sum}
-            for cid in (sorted(category_ids) if len(category_ids) >= 2 else []):
+            # Category IDs and names from select.heatSelect (value=CategoryId, text=categoryname)
+            category_options = []  # [(categoryid, categoryname), ...] in option order
+            for sel in soup_sum.select('select.heatSelect'):
+                for opt in sel.find_all('option', value=True):
+                    val = opt.get('value', '').strip()
+                    if val and val.isdigit():
+                        name = (opt.get_text(strip=True) or '')[:128]
+                        category_options.append((int(val), name or f'Kategória {val}'))
+                break  # use first select only
+            for cid, _ in category_options:
+                category_ids.add(cid)
+
+            # Default response shows first category; first option's value = its categoryid
+            first_cid = category_options[0][0] if category_options else None
+            fetch_for_category = {first_cid: soup_sum} if first_cid is not None else {None: soup_sum}
+            for cid in sorted(category_ids):
+                if cid == first_cid:
+                    continue  # already have default response
                 summary_url = f"{summary_base}&CategoryId={cid}"
                 print(f"[SCRAPE] GET {summary_url} (category {cid})", flush=True)
                 try:
@@ -334,7 +349,7 @@ def scrape_and_import(onlineeventid: int) -> None:
             rows_count_total = 0
             seen_heat_athlete = set()  # (lx_event_id, heatnumber, umk) to avoid duplicates
 
-            cats_display = ['default'] + sorted(c for c in fetch_for_category if c is not None)
+            cats_display = [c if c is not None else 'default' for c in sorted(fetch_for_category, key=lambda x: (x is not None, x if x is not None else 0))]
             print(f"[SCRAPE] {summary_base} ({event_title}) categories={cats_display}", flush=True)
 
             for category_id in sorted(fetch_for_category, key=lambda x: (x is not None, x or 0)):
@@ -357,9 +372,12 @@ def scrape_and_import(onlineeventid: int) -> None:
                             col_idx['name'] = i
                         elif 'TIME' in h or 'IDŐ' in h:
                             col_idx['time'] = i
+                        elif 'FINA' in h:
+                            col_idx['fina'] = i
                     rk_idx = col_idx.get('rk', 0)
                     name_idx = col_idx.get('name', 1)
                     time_idx = col_idx.get('time', 3)
+                    fina_idx = col_idx.get('fina')
 
                     rows = table.find_all('tr')[1:]
                     rows_count_total += len(rows)
@@ -367,7 +385,10 @@ def scrape_and_import(onlineeventid: int) -> None:
 
                     for tr in rows:
                         tds = tr.find_all('td')
-                        if len(tds) <= max(rk_idx, name_idx, time_idx):
+                        req_cols = [rk_idx, name_idx, time_idx]
+                        if fina_idx is not None:
+                            req_cols.append(fina_idx)
+                        if len(tds) <= max(req_cols):
                             continue
                         rank_s = tds[rk_idx].get_text(strip=True).replace('*', '').strip()
                         rank = int(rank_s) if rank_s and rank_s.isdigit() else None  # non-ranked: use NULL
@@ -376,6 +397,17 @@ def scrape_and_import(onlineeventid: int) -> None:
                         time_match = re.search(r'\d{1,2}:\d{2}\.\d{2}', time_raw)
                         time_s = time_match.group(0) if time_match else (time_raw.split()[0] if time_raw else '')
                         time_hund = _parse_swimtime(time_s) if time_s else None
+                        # Extract reaction time "R:1.94" -> 194 hundredths
+                        rt_match = re.search(r'R:(\d+)\.(\d{2})', time_raw, re.IGNORECASE)
+                        reactiontime_hund = int(rt_match.group(1)) * 100 + int(rt_match.group(2)) if rt_match else None
+                        # FINA points from FINA column
+                        finapoints = None
+                        if fina_idx is not None and fina_idx < len(tds):
+                            pts_raw = tds[fina_idx].get_text(strip=True)
+                            try:
+                                finapoints = int(float(pts_raw)) if pts_raw else None
+                            except (ValueError, TypeError):
+                                pass
                         # Parse status for DNS, DSQ, DQ, etc.
                         status = None
                         raw_upper = time_raw.upper()
@@ -467,9 +499,9 @@ def scrape_and_import(onlineeventid: int) -> None:
                             )
 
                         cur.execute(
-                            """INSERT INTO lx_result(athleteid, eventid, heatnumber, clubid, lane, timehundredths, status, rank)
-                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (umk, lx_event_id, heatnumber, club_id, lane, time_hund, status, rank)
+                            """INSERT INTO lx_result(athleteid, eventid, heatnumber, clubid, lane, timehundredths, status, rank, reactiontimehundredths, finapoints)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (umk, lx_event_id, heatnumber, club_id, lane, time_hund, status, rank, reactiontime_hund, finapoints)
                         )
                         result_count_total += 1
                     break  # one result table per category page
