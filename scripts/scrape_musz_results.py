@@ -9,7 +9,7 @@ status='scrape_failed' on failure (no retry).
 Parses:
 - event/program - session and event structure
 - event/eventdata - meet metadata
-- event/startlist - heat IDs (HeatId in links) to create lx_heat rows
+- event/startlist - heat numbers (HeatId in links) for result heatnumber
 - event/summary - all results per event, per CategoryId (includes non-ranked from age categories)
 
 Hungarian mappings: pillangó=FLY, hát=BACK, mell=BREAST, gyors=FREE, vegyes=IM
@@ -296,37 +296,8 @@ def scrape_and_import(onlineeventid: int) -> bool:
                 r_cat.raise_for_status()
                 fetch_for_category[cid] = BeautifulSoup(r_cat.text, 'html.parser')
 
-        # Discover heats from startlist/result links (event/result?HeatId=X or event/startlist?HeatId=X)
-        heat_ids_from_pages = set()
-        startlist_url = f"{BASE_URL}/event/startlist?OnlineEventId={onlineeventid}&SessionId={session_id}&EventId={event_id}"
-        try:
-            r_sl = requests.get(startlist_url, timeout=15)
-            r_sl.raise_for_status()
-            for a in BeautifulSoup(r_sl.text, 'html.parser').find_all('a', href=True):
-                href = a['href'].replace('&amp;', '&')
-                if ('event/result' in href or 'event/startlist' in href) and 'HeatId=' in href:
-                    qs = parse_qs(urlparse(href).query)
-                    hid = qs.get('HeatId', [None])[0]
-                    if hid and str(hid).isdigit() and int(hid) > 0:
-                        heat_ids_from_pages.add(int(hid))
-        except Exception as e:
-            print(f"[SCRAPE]   startlist fetch failed: {e}", flush=True)
-
-        heat_id_to_lx_heat = {}  # musz HeatId -> lx_heat_id
-        heat_counter = 0
-        for hid in sorted(heat_ids_from_pages):
-            heat_counter += 1
-            cur.execute(
-                """INSERT INTO lx_heat(eventid, sessionid, heatnumber)
-                   VALUES (%s,%s,%s) RETURNING id""",
-                (lx_event_id, lx_session_id, heat_counter)
-            )
-            heat_id_to_lx_heat[hid] = cur.fetchone()[0]
-        if heat_ids_from_pages:
-            print(f"[SCRAPE]   pre-created {len(heat_ids_from_pages)} heat(s) from startlist", flush=True)
-
         result_count_total = 0
-        seen_heat_athlete = set()  # (lx_heat_id, umk) to avoid duplicates
+        seen_heat_athlete = set()  # (lx_event_id, heatnumber, umk) to avoid duplicates
 
         print(f"[SCRAPE] {summary_base} ({event_title}) categories={sorted(c for c in category_ids if c is not None) or ['default']}", flush=True)
 
@@ -374,8 +345,8 @@ def scrape_and_import(onlineeventid: int) -> bool:
                     if umk is None:
                         continue
 
-                    # Get HeatId and lane from H/L column (link with HeatId=, or plain text "3/4" = heat 3, lane 4)
-                    heat_id = 0
+                    # Get heatnumber and lane from H/L column (link HeatId= or plain text "3/4" = heat 3, lane 4)
+                    heatnumber = 0  # 0 = not found, use 1 as default
                     lane = None
                     for cell in tds:
                         for a in cell.find_all('a', href=True):
@@ -384,39 +355,30 @@ def scrape_and_import(onlineeventid: int) -> bool:
                                 qs = parse_qs(urlparse(href).query)
                                 hid = qs.get('HeatId', [None])[0]
                                 if hid and str(hid).isdigit() and int(hid) > 0:
-                                    heat_id = int(hid)
+                                    heatnumber = int(hid)
                                 # Parse H/L from link text e.g. "3/4" or "[3/4]" -> lane = 4
                                 hl_text = a.get_text(strip=True).strip('[]')
                                 hl_match = re.match(r'(\d+)/(\d+)', hl_text)
                                 if hl_match:
                                     lane = int(hl_match.group(2))
                                 break
-                        if heat_id > 0:
+                        if heatnumber > 0:
                             break
                     # Fallback: parse heat/lane from plain text "X/Y" in any cell
-                    if heat_id == 0:
+                    if heatnumber == 0:
                         for cell in tds:
                             text = cell.get_text(strip=True).strip('[]')
                             hl_match = re.search(r'(\d+)/(\d+)', text)
                             if hl_match:
-                                heat_id = int(hl_match.group(1))
+                                heatnumber = int(hl_match.group(1))
                                 lane = int(hl_match.group(2))
                                 break
+                    if heatnumber == 0:
+                        heatnumber = 1  # default for combined/unknown results
 
-                    # Create lx_heat if new (for heat_ids not pre-created from startlist)
-                    if heat_id not in heat_id_to_lx_heat:
-                        heat_counter += 1
-                        cur.execute(
-                            """INSERT INTO lx_heat(eventid, sessionid, heatnumber)
-                               VALUES (%s,%s,%s) RETURNING id""",
-                            (lx_event_id, lx_session_id, heat_counter)
-                        )
-                        heat_id_to_lx_heat[heat_id] = cur.fetchone()[0]
-
-                    lx_heat_id = heat_id_to_lx_heat[heat_id]
-                    if (lx_heat_id, umk) in seen_heat_athlete:
+                    if (lx_event_id, heatnumber, umk) in seen_heat_athlete:
                         continue
-                    seen_heat_athlete.add((lx_heat_id, umk))
+                    seen_heat_athlete.add((lx_event_id, heatnumber, umk))
 
                     # Upsert club
                     club_code = (club_name or '')[:32] or 'UNK'
@@ -450,14 +412,15 @@ def scrape_and_import(onlineeventid: int) -> bool:
                         )
 
                     cur.execute(
-                        """INSERT INTO lx_result(athleteid, heatid, clubid, lane, timehundredths, rank)
-                           VALUES (%s,%s,%s,%s,%s,%s)""",
-                        (umk, lx_heat_id, club_id, lane, time_hund, rank)
+                        """INSERT INTO lx_result(athleteid, eventid, heatnumber, clubid, lane, timehundredths, rank)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                        (umk, lx_event_id, heatnumber, club_id, lane, time_hund, rank)
                     )
                     result_count_total += 1
                 break  # one result table per category page
 
-        print(f"[SCRAPE]   -> {len(heat_id_to_lx_heat)} heat(s), {result_count_total} result(s)", flush=True)
+        heats_count = len({(e, h) for e, h, _ in seen_heat_athlete})
+        print(f"[SCRAPE]   -> {heats_count} heat(s), {result_count_total} result(s)", flush=True)
         conn.commit()
 
     cur.close()

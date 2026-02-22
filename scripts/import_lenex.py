@@ -6,6 +6,8 @@ LENEX is an XML-based swimming data format. Structure:
   LENEX -> MEETS -> MEET -> SESSIONS -> SESSION -> EVENTS -> EVENT -> SWIMSTYLE, HEATS -> HEAT
         -> CLUBS -> CLUB -> ATHLETES -> ATHLETE -> RESULTS -> RESULT -> SPLITS -> SPLIT
 
+Heat is stored as a counter (heatnumber) on lx_result, not in a separate table.
+
 Processes files from importedlenexfile where status is downloaded or backed_up.
 """
 import os
@@ -122,9 +124,9 @@ def import_lenex_file(cur, conn, filepath: str, onlineeventid) -> bool:
     )
     conn.commit()
 
-    # Maps for LENEX ids -> our DB ids
+    # Maps for LENEX ids -> our DB ids / heat number
     eventid_to_lx_event = {}
-    heatid_to_lx_heat = {}
+    event_heat_to_number = {}  # (eventid, heatid) -> heatnumber
     sessionid_to_lx_session = {}
 
     # --- Sessions and Events ---
@@ -169,14 +171,10 @@ def import_lenex_file(cur, conn, filepath: str, onlineeventid) -> bool:
                 if heats_elem is not None:
                     for heat in heats_elem.findall('HEAT'):
                         heat_id = _attr(heat, 'heatid') or _attr(heat, 'number')
-                        heat_num = _attr(heat, 'number')
-                        cur.execute(
-                            """INSERT INTO lx_heat(eventid, sessionid, heatnumber)
-                               VALUES (%s,%s,%s) RETURNING id""",
-                            (lx_event_id, session_id, int(heat_num) if heat_num and heat_num.isdigit() else None)
-                        )
-                        lx_heat_id = cur.fetchone()[0]
-                        heatid_to_lx_heat[heat_id] = lx_heat_id
+                        heat_num = _attr(heat, 'number') or heat_id
+                        heatnumber = int(heat_num) if heat_num and str(heat_num).isdigit() else None
+                        if heat_id is not None and heatnumber is not None:
+                            event_heat_to_number[(ev_id, heat_id)] = heatnumber
 
     # Update meet start/end from sessions
     cur.execute(
@@ -272,8 +270,8 @@ def import_lenex_file(cur, conn, filepath: str, onlineeventid) -> bool:
                 if not res_eventid or not res_heatid:
                     continue
                 lx_event_id = eventid_to_lx_event.get(res_eventid)
-                lx_heat_id = heatid_to_lx_heat.get(res_heatid)
-                if not lx_event_id or not lx_heat_id:
+                heatnumber = event_heat_to_number.get((res_eventid, res_heatid))
+                if not lx_event_id or heatnumber is None:
                     continue
 
                 lane_s = _attr(res, 'lane')
@@ -289,9 +287,9 @@ def import_lenex_file(cur, conn, filepath: str, onlineeventid) -> bool:
                 reactiontime = _parse_swimtime(react_s) if react_s else None
 
                 cur.execute(
-                    """INSERT INTO lx_result(athleteid, heatid, clubid, lane, timehundredths, status, rank, reactiontime)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-                    (athlete_id, lx_heat_id, club_id, lane, time_hund, status or None, rank, reactiontime)
+                    """INSERT INTO lx_result(athleteid, eventid, heatnumber, clubid, lane, timehundredths, status, rank, reactiontime)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (athlete_id, lx_event_id, heatnumber, club_id, lane, time_hund, status or None, rank, reactiontime)
                 )
                 result_id = cur.fetchone()[0]
 

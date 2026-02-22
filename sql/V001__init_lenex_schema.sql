@@ -81,28 +81,13 @@ CREATE INDEX ix_lx_event_query
 ON lx_event(meetid, stroke, distance, gender);
 
 -- =====================
--- HEAT
--- =====================
-CREATE TABLE lx_heat (
-    id BIGSERIAL PRIMARY KEY,
-    eventid BIGINT NOT NULL REFERENCES lx_event(id),
-    sessionid BIGINT REFERENCES lx_session(id),
-    heatnumber INT
-);
-
-CREATE INDEX ix_lx_heat_event
-ON lx_heat(eventid);
-
-CREATE INDEX ix_lx_heat_session
-ON lx_heat(sessionid);
-
--- =====================
--- RESULT
+-- RESULT (heat as counter: eventid + heatnumber)
 -- =====================
 CREATE TABLE lx_result (
     id BIGSERIAL PRIMARY KEY,
     athleteid BIGINT NOT NULL REFERENCES lx_athlete(id),
-    heatid BIGINT NOT NULL REFERENCES lx_heat(id),
+    eventid BIGINT NOT NULL REFERENCES lx_event(id),
+    heatnumber INT,
     clubid BIGINT REFERENCES lx_club(id),
     lane INT,
     timehundredths INT,
@@ -114,8 +99,11 @@ CREATE TABLE lx_result (
 CREATE INDEX ix_lx_result_athlete
 ON lx_result(athleteid);
 
-CREATE INDEX ix_lx_result_heat
-ON lx_result(heatid);
+CREATE INDEX ix_lx_result_event
+ON lx_result(eventid);
+
+CREATE INDEX ix_lx_result_event_heat
+ON lx_result(eventid, heatnumber);
 
 CREATE INDEX ix_lx_result_club
 ON lx_result(clubid);
@@ -143,19 +131,23 @@ CREATE INDEX ix_lx_split_result
 ON lx_split(resultid);
 
 -- =====================
--- RELAY RESULT
+-- RELAY RESULT (heat as counter: eventid + heatnumber)
 -- =====================
 CREATE TABLE lx_relayresult (
     id BIGSERIAL PRIMARY KEY,
-    heatid BIGINT NOT NULL REFERENCES lx_heat(id),
+    eventid BIGINT REFERENCES lx_event(id),
+    heatnumber INT,
     clubid BIGINT REFERENCES lx_club(id),
     timehundredths INT,
     status VARCHAR(10),
     rank INT
 );
 
-CREATE INDEX ix_lx_relayresult_heat
-ON lx_relayresult(heatid);
+CREATE INDEX ix_lx_relayresult_event
+ON lx_relayresult(eventid);
+
+CREATE INDEX ix_lx_relayresult_event_heat
+ON lx_relayresult(eventid, heatnumber);
 
 CREATE INDEX ix_lx_relayresult_club
 ON lx_relayresult(clubid);
