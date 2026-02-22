@@ -9,8 +9,7 @@ status='scrape_failed' on failure (no retry).
 Parses:
 - event/program - session and event structure
 - event/eventdata - meet metadata
-- event/summary - heat IDs per event
-- event/result - heat results (rank, lane, athlete, time)
+- event/summary - all results in one page per event (rank, athlete, time, heat from H/L link)
 
 Hungarian mappings: pillangó=FLY, hát=BACK, mell=BREAST, gyors=FREE, vegyes=IM
                    férfi=M, női=F
@@ -267,130 +266,130 @@ def scrape_and_import(onlineeventid: int) -> bool:
         r_sum.raise_for_status()
         soup_sum = BeautifulSoup(r_sum.text, 'html.parser')
 
-        heat_links = []
-        for a in soup_sum.find_all('a', href=True):
-            href = a['href'].replace('&amp;', '&')
-            if 'event/result' in href and 'HeatId=' in href:
-                qs = parse_qs(urlparse(href).query)
-                hid = qs.get('HeatId', [None])[0]
-                if hid:
-                    try:
-                        result_url = urljoin(BASE_URL, href)
-                        heat_links.append((int(hid), result_url))
-                    except (ValueError, TypeError):
-                        pass
+        # Parse summary table (all results in one page; no per-heat fetching)
+        heat_id_to_lx_heat = {}  # musz HeatId -> lx_heat_id
+        heat_counter = 0
+        result_count_total = 0
+        seen_heat_athlete = set()  # (lx_heat_id, umk) to avoid duplicates
 
-        # If no heat links, try result with empty HeatId
-        if not heat_links:
-            result_url = f"{BASE_URL}/event/result?OnlineEventId={onlineeventid}&SessionId={session_id}&EventId={event_id}&HeatId=0"
-            heat_links = [(0, result_url)]
-        print(f"[SCRAPE]   -> {len(heat_links)} heat(s)", flush=True)
+        for table in soup_sum.find_all('table'):
+            headers = [th.get_text(strip=True).upper()[:20] for th in table.find_all('th')]
+            if not any('RK' in h or 'HELY' in h for h in headers):
+                continue
+            if not any('NAME' in h or 'NEV' in h for h in headers):
+                continue
+            if not any('TIME' in h or 'IDŐ' in h for h in headers):
+                continue
 
-        for heat_num, (_, result_url) in enumerate(heat_links, 1):
-            cur.execute(
-                """INSERT INTO lx_heat(eventid, sessionid, heatnumber)
-                   VALUES (%s,%s,%s) RETURNING id""",
-                (lx_event_id, lx_session_id, heat_num)
-            )
-            lx_heat_id = cur.fetchone()[0]
+            col_idx = {}
+            for i, h in enumerate(headers):
+                if 'RK' in h or 'HELY' in h:
+                    col_idx['rk'] = i
+                elif 'NAME' in h or 'NEV' in h:
+                    col_idx['name'] = i
+                elif 'TIME' in h or 'IDŐ' in h:
+                    col_idx['time'] = i
+            rk_idx = col_idx.get('rk', 0)
+            name_idx = col_idx.get('name', 1)
+            time_idx = col_idx.get('time', 3)
 
-            print(f"[SCRAPE] GET {result_url} (heat {heat_num})", flush=True)
-            r_res = requests.get(result_url)
-            r_res.raise_for_status()
-            soup_res = BeautifulSoup(r_res.text, 'html.parser')
+            rows = table.find_all('tr')[1:]
+            print(f"[SCRAPE]   -> summary table: {len(rows)} rows", flush=True)
 
-            # Find result table: RK, LN, Name, Time, Gap, FINA
-            tables = soup_res.find_all('table')
-            print(f"[SCRAPE]   -> {len(tables)} table(s) on page", flush=True)
-            for ti, table in enumerate(tables):
-                headers = [th.get_text(strip=True).upper()[:20] for th in table.find_all('th')]
-                if not any('RK' in h or 'HELY' in h for h in headers):
-                    print(f"[SCRAPE]   -> table {ti}: skip (no RK/HELY in {headers})", flush=True)
+            for tr in rows:
+                tds = tr.find_all('td')
+                if len(tds) <= max(rk_idx, name_idx, time_idx):
                     continue
-                if not any('TIME' in h or 'IDŐ' in h for h in headers):
-                    print(f"[SCRAPE]   -> table {ti}: skip (no TIME/IDŐ in {headers})", flush=True)
+                rank_s = tds[rk_idx].get_text(strip=True)
+                if not rank_s or not rank_s.replace('*', '').isdigit():
                     continue
-                col_idx = {}
-                for i, h in enumerate(headers):
-                    if 'RK' in h or 'HELY' in h:
-                        col_idx['rk'] = i
-                    elif 'LN' in h:
-                        col_idx['ln'] = i
-                    elif 'NAME' in h or 'NEV' in h:
-                        col_idx['name'] = i
-                    elif 'TIME' in h or 'IDŐ' in h:
-                        col_idx['time'] = i
-                rk_idx = col_idx.get('rk', 0)
-                ln_idx = col_idx.get('ln', 1)
-                name_idx = col_idx.get('name', 2)
-                time_idx = col_idx.get('time', 4)
-                rows = table.find_all('tr')[1:]
-                print(f"[SCRAPE]   -> table {ti}: match! headers={headers}, cols rk={rk_idx} ln={ln_idx} name={name_idx} time={time_idx}, {len(rows)} data rows", flush=True)
+                rank = int(rank_s.replace('*', ''))
+                time_s = tds[time_idx].get_text(strip=True).replace('*', '').split()[0] if tds[time_idx].get_text(strip=True) else ''
+                time_hund = _parse_swimtime(time_s)
 
-                result_count = 0
-                for tr in rows:
-                    tds = tr.find_all('td')
-                    if len(tds) <= max(rk_idx, ln_idx, name_idx, time_idx):
-                        continue
-                    rank_s = tds[rk_idx].get_text(strip=True)
-                    if not rank_s or not rank_s.isdigit():
-                        continue
-                    rank = int(rank_s)
-                    lane_s = tds[ln_idx].get_text(strip=True)
-                    lane = int(lane_s) if lane_s.isdigit() else None
-                    time_s = tds[time_idx].get_text(strip=True)
-                    time_hund = _parse_swimtime(time_s)
+                name_cell = tds[name_idx]
+                a_tag = name_cell.find('a', href=True)
+                if not a_tag:
+                    continue
+                umk, firstname, lastname, club_name, birth_year = _parse_athlete_from_link(a_tag)
+                if umk is None:
+                    continue
 
-                    name_cell = tds[name_idx]
-                    a_tag = name_cell.find('a', href=True)
-                    if not a_tag:
-                        continue
-                    umk, firstname, lastname, club_name, birth_year = _parse_athlete_from_link(a_tag)
-                    if umk is None:
-                        continue
+                # Get HeatId and lane from H/L column (link text "H/L" e.g. "3/4" = heat 3, lane 4)
+                heat_id = 0
+                lane = None
+                for cell in tds:
+                    for a in cell.find_all('a', href=True):
+                        href = a['href'].replace('&amp;', '&')
+                        if 'event/result' in href and 'HeatId=' in href:
+                            qs = parse_qs(urlparse(href).query)
+                            hid = qs.get('HeatId', [None])[0]
+                            if hid and str(hid).isdigit() and int(hid) > 0:
+                                heat_id = int(hid)
+                            # Parse H/L from link text e.g. "3/4" or "[3/4]" -> lane = 4
+                            hl_text = a.get_text(strip=True).strip('[]')
+                            hl_match = re.match(r'(\d+)/(\d+)', hl_text)
+                            if hl_match:
+                                lane = int(hl_match.group(2))
+                            break
+                    if heat_id > 0:
+                        break
 
-                    # Upsert club
-                    club_code = (club_name or '')[:32] or 'UNK'
-                    cur.execute("SELECT id FROM lx_club WHERE lenexclubcode = %s", (club_code,))
-                    row = cur.fetchone()
-                    if row:
-                        club_id = row[0]
-                    else:
-                        cur.execute(
-                            "INSERT INTO lx_club(lenexclubcode, name, nation) VALUES (%s,%s,'HUN') RETURNING id",
-                            (club_code, club_name or club_code)
-                        )
-                        club_id = cur.fetchone()[0]
-
-                    # Athlete: skip swimmer fetch if already in DB
-                    cur.execute("SELECT 1 FROM lx_athlete WHERE id = %s", (umk,))
-                    if cur.fetchone():
-                        # Already exists, no need to fetch swimmer page or upsert
-                        pass
-                    else:
-                        # New athlete: use birth year from result page, or fetch swimmer subpage
-                        if birth_year is None:
-                            birth_year = _fetch_swimmer_birthyear(onlineeventid, umk)
-                        birthdate = date(birth_year, 1, 1) if birth_year else None
-                        cur.execute(
-                            """INSERT INTO lx_athlete(id, firstname, lastname, birthdate, gender)
-                               VALUES (%s,%s,%s,%s,'X')
-                               ON CONFLICT (id) DO UPDATE SET
-                                 firstname=COALESCE(EXCLUDED.firstname,lx_athlete.firstname),
-                                 lastname=COALESCE(EXCLUDED.lastname,lx_athlete.lastname),
-                                 birthdate=COALESCE(EXCLUDED.birthdate,lx_athlete.birthdate)""",
-                            (umk, firstname, lastname, birthdate)
-                        )
-
+                # Create lx_heat if new
+                if heat_id not in heat_id_to_lx_heat:
+                    heat_counter += 1
                     cur.execute(
-                        """INSERT INTO lx_result(athleteid, heatid, clubid, lane, timehundredths, rank)
-                           VALUES (%s,%s,%s,%s,%s,%s)""",
-                        (umk, lx_heat_id, club_id, lane, time_hund, rank)
+                        """INSERT INTO lx_heat(eventid, sessionid, heatnumber)
+                           VALUES (%s,%s,%s) RETURNING id""",
+                        (lx_event_id, lx_session_id, heat_counter)
                     )
-                    result_count += 1
-                print(f"[SCRAPE]   -> inserted {result_count} result(s) for heat {heat_num}", flush=True)
-                break
+                    heat_id_to_lx_heat[heat_id] = cur.fetchone()[0]
 
+                lx_heat_id = heat_id_to_lx_heat[heat_id]
+                if (lx_heat_id, umk) in seen_heat_athlete:
+                    continue
+                seen_heat_athlete.add((lx_heat_id, umk))
+
+                # Upsert club
+                club_code = (club_name or '')[:32] or 'UNK'
+                cur.execute("SELECT id FROM lx_club WHERE lenexclubcode = %s", (club_code,))
+                row = cur.fetchone()
+                if row:
+                    club_id = row[0]
+                else:
+                    cur.execute(
+                        "INSERT INTO lx_club(lenexclubcode, name, nation) VALUES (%s,%s,'HUN') RETURNING id",
+                        (club_code, club_name or club_code)
+                    )
+                    club_id = cur.fetchone()[0]
+
+                # Athlete: skip swimmer fetch if already in DB
+                cur.execute("SELECT 1 FROM lx_athlete WHERE id = %s", (umk,))
+                if cur.fetchone():
+                    pass
+                else:
+                    if birth_year is None:
+                        birth_year = _fetch_swimmer_birthyear(onlineeventid, umk)
+                    birthdate = date(birth_year, 1, 1) if birth_year else None
+                    cur.execute(
+                        """INSERT INTO lx_athlete(id, firstname, lastname, birthdate, gender)
+                           VALUES (%s,%s,%s,%s,'X')
+                           ON CONFLICT (id) DO UPDATE SET
+                             firstname=COALESCE(EXCLUDED.firstname,lx_athlete.firstname),
+                             lastname=COALESCE(EXCLUDED.lastname,lx_athlete.lastname),
+                             birthdate=COALESCE(EXCLUDED.birthdate,lx_athlete.birthdate)""",
+                        (umk, firstname, lastname, birthdate)
+                    )
+
+                cur.execute(
+                    """INSERT INTO lx_result(athleteid, heatid, clubid, lane, timehundredths, rank)
+                       VALUES (%s,%s,%s,%s,%s,%s)""",
+                    (umk, lx_heat_id, club_id, lane, time_hund, rank)
+                )
+                result_count_total += 1
+            break
+
+        print(f"[SCRAPE]   -> {len(heat_id_to_lx_heat)} heat(s), {result_count_total} result(s)", flush=True)
         conn.commit()
 
     cur.close()
