@@ -46,6 +46,14 @@ def _parse_swimtime(s: str) -> int | None:
     if not s or s.upper() in ('NT', 'DNS', 'DSQ', 'DQ', 'VL', '-', ''):
         return None
     s = s.replace(',', '.').strip()
+    # Extract M:SS.hh when concatenated with percentage (e.g. "00:29.8798.298%")
+    m = re.search(r'(\d{1,2}):(\d{2})\.(\d{2})', s)
+    if m:
+        try:
+            mins, sec, hund = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return mins * 6000 + sec * 100 + hund
+        except (ValueError, IndexError):
+            pass
     parts = s.split(':')
     try:
         if len(parts) == 1:
@@ -142,290 +150,347 @@ def _fetch_swimmer_birthyear(onlineeventid: int, umk: int) -> int | None:
     return None
 
 
-def scrape_and_import(onlineeventid: int) -> bool:
-    """Scrape MUSZ pages and import into lx_* tables. Returns True on success."""
+def scrape_and_import(onlineeventid: int) -> None:
+    """Scrape MUSZ pages and import into lx_* tables. Best-effort: logs errors, never raises."""
     print(f"[SCRAPE] Starting for onlineeventid={onlineeventid}", flush=True)
     meet_id = int(onlineeventid)
-    conn = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD
-    )
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD
+        )
+    except Exception as e:
+        print(f"[SCRAPE] ERROR: DB connect failed for {onlineeventid}: {e}", flush=True)
+        traceback.print_exc()
+        return
     cur = conn.cursor()
     print(f"[SCRAPE] DB connected, fetching eventdata...", flush=True)
 
-    # 1. Fetch eventdata for meet info
-    eventdata_url = f"{BASE_URL}/event/eventdata?OnlineEventId={onlineeventid}"
-    print(f"[SCRAPE] GET {eventdata_url}", flush=True)
-    r = requests.get(eventdata_url)
-    r.raise_for_status()
-    soup_ed = BeautifulSoup(r.text, 'html.parser')
-    meet_name = 'Unknown'
-    for h in soup_ed.find_all(['h4', 'h5', 'h6']):
-        t = h.get_text(strip=True)
-        if t and ' - ' in t and len(t) < 200:
-            meet_name = t.split(' - ')[0].strip()
-            break
-    # Parse date range
-    startdate, enddate = None, None
-    for h in soup_ed.find_all('h6'):
-        t = h.get_text(strip=True)
-        if re.match(r'\d{4}-\d{2}-\d{2}\s*-\s*\d{4}-\d{2}-\d{2}', t):
-            parts = t.split(' - ')
-            try:
-                startdate = datetime.strptime(parts[0].strip()[:10], '%Y-%m-%d').date()
-                enddate = datetime.strptime(parts[1].strip()[:10], '%Y-%m-%d').date()
-            except ValueError:
-                pass
-            break
-    course = 'LCM'
-    if '50m' in r.text or '50 m' in r.text:
-        course = 'SCM'
-
-    cur.execute(
-        """INSERT INTO lx_meet(id, name, startdate, enddate, course, datasource)
-           VALUES (%s,%s,%s,%s,%s,'scraped')
-           ON CONFLICT (id) DO UPDATE SET name=COALESCE(EXCLUDED.name,lx_meet.name),
-             startdate=COALESCE(EXCLUDED.startdate,lx_meet.startdate),
-             enddate=COALESCE(EXCLUDED.enddate,lx_meet.enddate),
-             course=COALESCE(EXCLUDED.course,lx_meet.course),
-             datasource=CASE WHEN lx_meet.datasource='lenex' THEN lx_meet.datasource ELSE 'scraped' END""",
-        (meet_id, meet_name, startdate, enddate, course)
-    )
-    conn.commit()
-
-    # 2. Fetch program page
-    program_url = f"{BASE_URL}/event/program?OnlineEventId={onlineeventid}"
-    print(f"[SCRAPE] GET {program_url}", flush=True)
-    r = requests.get(program_url)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, 'html.parser')
-
-    # Parse sessions and events from summary links
-    events_to_scrape = []  # (session_id, event_id, event_title)
-    session_dates = {}  # session_id -> date from nearby text
-
-    for a in soup.find_all('a', href=True):
-        href = a['href'].replace('&amp;', '&')
-        if 'event/summary' in href and 'SessionId=' in href and 'EventId=' in href:
-            qs = parse_qs(urlparse(href).query)
-            sid = qs.get('SessionId', [None])[0]
-            eid = qs.get('EventId', [None])[0]
-            if sid and eid:
+    try:
+        # 1. Fetch eventdata for meet info
+        eventdata_url = f"{BASE_URL}/event/eventdata?OnlineEventId={onlineeventid}"
+        print(f"[SCRAPE] GET {eventdata_url}", flush=True)
+        r = requests.get(eventdata_url, timeout=30)
+        if not r.ok:
+            print(f"[SCRAPE] ERROR: eventdata {r.status_code} for {onlineeventid}", flush=True)
+            cur.close()
+            conn.close()
+            return
+        soup_ed = BeautifulSoup(r.text, 'html.parser')
+        meet_name = 'Unknown'
+        for h in soup_ed.find_all(['h4', 'h5', 'h6']):
+            t = h.get_text(strip=True)
+            if t and ' - ' in t and len(t) < 200:
+                meet_name = t.split(' - ')[0].strip()
+                break
+        # Parse date range
+        startdate, enddate = None, None
+        for h in soup_ed.find_all('h6'):
+            t = h.get_text(strip=True)
+            if re.match(r'\d{4}-\d{2}-\d{2}\s*-\s*\d{4}-\d{2}-\d{2}', t):
+                parts = t.split(' - ')
                 try:
-                    session_id = int(sid)
-                    event_id = int(eid)
-                except (ValueError, TypeError):
-                    continue
-                title = a.get_text(strip=True)
-                # Look for session date in preceding elements (nearest first)
-                for prev in a.find_all_previous(string=True):
-                    prev = str(prev).strip()
-                    if re.search(r'\d{4}\.\d{2}\.\d{2}', prev) and 'SESSION' in prev.upper():
-                        session_dates[session_id] = _parse_session_date(prev)
-                        break
-                events_to_scrape.append((session_id, event_id, title))
-
-    # Dedupe events
-    seen = set()
-    unique_events = []
-    for sid, eid, title in events_to_scrape:
-        if (sid, eid) not in seen:
-            seen.add((sid, eid))
-            unique_events.append((sid, eid, title))
-    print(f"[SCRAPE] Found {len(unique_events)} events to scrape", flush=True)
-
-    # Create sessions (one per unique SessionId)
-    session_ids = {}
-    for sid, _, _ in unique_events:
-        if sid not in session_ids:
-            sess_num = len(session_ids) + 1
-            sess_date = session_dates.get(sid)
-            cur.execute(
-                """INSERT INTO lx_session(meetid, sessionnumber, sessiondate)
-                   VALUES (%s,%s,%s) RETURNING id""",
-                (meet_id, sess_num, sess_date.date() if sess_date else None)
-            )
-            session_ids[sid] = cur.fetchone()[0]
-    conn.commit()
-
-    # 3. For each event, fetch summary to get heat links, then result pages
-    for session_id, event_id, event_title in unique_events:
-        stroke, distance, gender = _parse_event_title(event_title)
-        lx_session_id = session_ids.get(session_id)
-        if not lx_session_id:
-            continue
+                    startdate = datetime.strptime(parts[0].strip()[:10], '%Y-%m-%d').date()
+                    enddate = datetime.strptime(parts[1].strip()[:10], '%Y-%m-%d').date()
+                except ValueError:
+                    pass
+                break
+        course = 'LCM'
+        if '50m' in r.text or '50 m' in r.text:
+            course = 'SCM'
 
         cur.execute(
-            """INSERT INTO lx_event(meetid, stroke, distance, round, gender)
-               VALUES (%s,%s,%s,'TIM',%s) RETURNING id""",
-            (meet_id, stroke, distance, gender)
+            """INSERT INTO lx_meet(id, name, startdate, enddate, course, datasource)
+               VALUES (%s,%s,%s,%s,%s,'scraped')
+               ON CONFLICT (id) DO UPDATE SET name=COALESCE(EXCLUDED.name,lx_meet.name),
+                 startdate=COALESCE(EXCLUDED.startdate,lx_meet.startdate),
+                 enddate=COALESCE(EXCLUDED.enddate,lx_meet.enddate),
+                 course=COALESCE(EXCLUDED.course,lx_meet.course),
+                 datasource=CASE WHEN lx_meet.datasource='lenex' THEN lx_meet.datasource ELSE 'scraped' END""",
+            (meet_id, meet_name, startdate, enddate, course)
         )
-        lx_event_id = cur.fetchone()[0]
-
-        # Discover CategoryIds from summary page (tabs) and program page (ALL, D1, D2, etc.)
-        # First category is not necessarily 1 - only use IDs found in links
-        category_ids = set()
-        summary_base = f"{BASE_URL}/event/summary?OnlineEventId={onlineeventid}&SessionId={session_id}&EventId={event_id}"
-        r_sum = requests.get(summary_base)
-        r_sum.raise_for_status()
-        soup_sum = BeautifulSoup(r_sum.text, 'html.parser')
-        for a in soup_sum.find_all('a', href=True):
-            href = a['href'].replace('&amp;', '&')
-            if 'event/summary' in href and f'EventId={event_id}' in href:
-                qs = parse_qs(urlparse(href).query)
-                cid = qs.get('CategoryId', [None])[0]
-                if cid is not None and str(cid).isdigit():
-                    category_ids.add(int(cid))
-        for a in soup.find_all('a', href=True):  # program page
-            href = a['href'].replace('&amp;', '&')
-            if 'event/summary' in href and f'EventId={event_id}' in href:
-                qs = parse_qs(urlparse(href).query)
-                cid = qs.get('CategoryId', [None])[0]
-                if cid is not None and str(cid).isdigit():
-                    category_ids.add(int(cid))
-
-        # If no category links found, use initial response (single-category event)
-        if not category_ids:
-            category_ids = {None}
-            fetch_for_category = {None: soup_sum}
-        else:
-            fetch_for_category = {}
-            for cid in sorted(category_ids):
-                summary_url = f"{summary_base}&CategoryId={cid}"
-                print(f"[SCRAPE] GET {summary_url} (category {cid})", flush=True)
-                r_cat = requests.get(summary_url)
-                r_cat.raise_for_status()
-                fetch_for_category[cid] = BeautifulSoup(r_cat.text, 'html.parser')
-
-        result_count_total = 0
-        seen_heat_athlete = set()  # (lx_event_id, heatnumber, umk) to avoid duplicates
-
-        print(f"[SCRAPE] {summary_base} ({event_title}) categories={sorted(c for c in category_ids if c is not None) or ['default']}", flush=True)
-
-        for category_id in sorted(category_ids, key=lambda x: (x is None, x)):
-            soup_cat = fetch_for_category[category_id]
-
-            for table in soup_cat.find_all('table'):
-                headers = [th.get_text(strip=True).upper()[:20] for th in table.find_all('th')]
-                if not any('RK' in h or 'HELY' in h for h in headers):
-                    continue
-                if not any('NAME' in h or 'NEV' in h for h in headers):
-                    continue
-                if not any('TIME' in h or 'IDŐ' in h for h in headers):
-                    continue
-
-                col_idx = {}
-                for i, h in enumerate(headers):
-                    if 'RK' in h or 'HELY' in h:
-                        col_idx['rk'] = i
-                    elif 'NAME' in h or 'NEV' in h:
-                        col_idx['name'] = i
-                    elif 'TIME' in h or 'IDŐ' in h:
-                        col_idx['time'] = i
-                rk_idx = col_idx.get('rk', 0)
-                name_idx = col_idx.get('name', 1)
-                time_idx = col_idx.get('time', 3)
-
-                rows = table.find_all('tr')[1:]
-                print(f"[SCRAPE]   -> summary table: {len(rows)} rows (cat {category_id or 'default'})", flush=True)
-
-                for tr in rows:
-                    tds = tr.find_all('td')
-                    if len(tds) <= max(rk_idx, name_idx, time_idx):
-                        continue
-                    rank_s = tds[rk_idx].get_text(strip=True).replace('*', '').strip()
-                    rank = int(rank_s) if rank_s and rank_s.isdigit() else None  # non-ranked: use NULL
-                    time_s = tds[time_idx].get_text(strip=True).replace('*', '').split()[0] if tds[time_idx].get_text(strip=True) else ''
-                    time_hund = _parse_swimtime(time_s)
-
-                    name_cell = tds[name_idx]
-                    a_tag = name_cell.find('a', href=True)
-                    if not a_tag:
-                        continue
-                    umk, firstname, lastname, club_name, birth_year = _parse_athlete_from_link(a_tag)
-                    if umk is None:
-                        continue
-
-                    # Get heatnumber and lane from H/L column (link HeatId= or plain text "3/4" = heat 3, lane 4)
-                    heatnumber = 0  # 0 = not found, use 1 as default
-                    lane = None
-                    for cell in tds:
-                        for a in cell.find_all('a', href=True):
-                            href = a['href'].replace('&amp;', '&')
-                            if ('event/result' in href or 'event/startlist' in href) and 'HeatId=' in href:
-                                qs = parse_qs(urlparse(href).query)
-                                hid = qs.get('HeatId', [None])[0]
-                                if hid and str(hid).isdigit() and int(hid) > 0:
-                                    heatnumber = int(hid)
-                                # Parse H/L from link text e.g. "3/4" or "[3/4]" -> lane = 4
-                                hl_text = a.get_text(strip=True).strip('[]')
-                                hl_match = re.match(r'(\d+)/(\d+)', hl_text)
-                                if hl_match:
-                                    lane = int(hl_match.group(2))
-                                break
-                        if heatnumber > 0:
-                            break
-                    # Fallback: parse heat/lane from plain text "X/Y" in any cell
-                    if heatnumber == 0:
-                        for cell in tds:
-                            text = cell.get_text(strip=True).strip('[]')
-                            hl_match = re.search(r'(\d+)/(\d+)', text)
-                            if hl_match:
-                                heatnumber = int(hl_match.group(1))
-                                lane = int(hl_match.group(2))
-                                break
-                    if heatnumber == 0:
-                        heatnumber = 1  # default for combined/unknown results
-
-                    if (lx_event_id, heatnumber, umk) in seen_heat_athlete:
-                        continue
-                    seen_heat_athlete.add((lx_event_id, heatnumber, umk))
-
-                    # Upsert club
-                    club_code = (club_name or '')[:32] or 'UNK'
-                    cur.execute("SELECT id FROM lx_club WHERE lenexclubcode = %s", (club_code,))
-                    row = cur.fetchone()
-                    if row:
-                        club_id = row[0]
-                    else:
-                        cur.execute(
-                            "INSERT INTO lx_club(lenexclubcode, name, nation) VALUES (%s,%s,'HUN') RETURNING id",
-                            (club_code, club_name or club_code)
-                        )
-                        club_id = cur.fetchone()[0]
-
-                    # Athlete: skip swimmer fetch if already in DB
-                    cur.execute("SELECT 1 FROM lx_athlete WHERE id = %s", (umk,))
-                    if cur.fetchone():
-                        pass
-                    else:
-                        if birth_year is None:
-                            birth_year = _fetch_swimmer_birthyear(onlineeventid, umk)
-                        birthdate = date(birth_year, 1, 1) if birth_year else None
-                        cur.execute(
-                            """INSERT INTO lx_athlete(id, firstname, lastname, birthdate, gender)
-                               VALUES (%s,%s,%s,%s,'X')
-                               ON CONFLICT (id) DO UPDATE SET
-                                 firstname=COALESCE(EXCLUDED.firstname,lx_athlete.firstname),
-                                 lastname=COALESCE(EXCLUDED.lastname,lx_athlete.lastname),
-                                 birthdate=COALESCE(EXCLUDED.birthdate,lx_athlete.birthdate)""",
-                            (umk, firstname, lastname, birthdate)
-                        )
-
-                    cur.execute(
-                        """INSERT INTO lx_result(athleteid, eventid, heatnumber, clubid, lane, timehundredths, rank)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-                        (umk, lx_event_id, heatnumber, club_id, lane, time_hund, rank)
-                    )
-                    result_count_total += 1
-                break  # one result table per category page
-
-        heats_count = len({(e, h) for e, h, _ in seen_heat_athlete})
-        print(f"[SCRAPE]   -> {heats_count} heat(s), {result_count_total} result(s)", flush=True)
         conn.commit()
 
-    cur.close()
-    conn.close()
-    return True
+        # 2. Fetch program page
+        program_url = f"{BASE_URL}/event/program?OnlineEventId={onlineeventid}"
+        print(f"[SCRAPE] GET {program_url}", flush=True)
+        r = requests.get(program_url, timeout=30)
+        if not r.ok:
+            print(f"[SCRAPE] ERROR: program {r.status_code} for {onlineeventid}", flush=True)
+            cur.close()
+            conn.close()
+            return
+        soup = BeautifulSoup(r.text, 'html.parser')
+
+        # Parse sessions and events from summary links
+        events_to_scrape = []  # (session_id, event_id, event_title)
+        session_dates = {}  # session_id -> date from nearby text
+
+        for a in soup.find_all('a', href=True):
+            href = a['href'].replace('&amp;', '&')
+            if 'event/summary' in href and 'SessionId=' in href and 'EventId=' in href:
+                qs = parse_qs(urlparse(href).query)
+                sid = qs.get('SessionId', [None])[0]
+                eid = qs.get('EventId', [None])[0]
+                if sid and eid:
+                    try:
+                        session_id = int(sid)
+                        event_id = int(eid)
+                    except (ValueError, TypeError):
+                        continue
+                    title = a.get_text(strip=True)
+                    # Look for session date in preceding elements (nearest first)
+                    for prev in a.find_all_previous(string=True):
+                        prev = str(prev).strip()
+                        if re.search(r'\d{4}\.\d{2}\.\d{2}', prev) and 'SESSION' in prev.upper():
+                            session_dates[session_id] = _parse_session_date(prev)
+                            break
+                    events_to_scrape.append((session_id, event_id, title))
+
+        # Dedupe events
+        seen = set()
+        unique_events = []
+        for sid, eid, title in events_to_scrape:
+            if (sid, eid) not in seen:
+                seen.add((sid, eid))
+                unique_events.append((sid, eid, title))
+        print(f"[SCRAPE] Found {len(unique_events)} events to scrape", flush=True)
+
+        # Create sessions (one per unique SessionId)
+        session_ids = {}
+        for sid, _, _ in unique_events:
+            if sid not in session_ids:
+                sess_num = len(session_ids) + 1
+                sess_date = session_dates.get(sid)
+                cur.execute(
+                    """INSERT INTO lx_session(meetid, sessionnumber, sessiondate)
+                       VALUES (%s,%s,%s) RETURNING id""",
+                    (meet_id, sess_num, sess_date.date() if sess_date else None)
+                )
+                session_ids[sid] = cur.fetchone()[0]
+        conn.commit()
+
+        # 3. For each event, fetch summary to get heat links, then result pages
+        for session_id, event_id, event_title in unique_events:
+            stroke, distance, gender = _parse_event_title(event_title)
+            lx_session_id = session_ids.get(session_id)
+            if not lx_session_id:
+                continue
+
+            cur.execute(
+                """INSERT INTO lx_event(meetid, stroke, distance, round, gender)
+                   VALUES (%s,%s,%s,'TIM',%s) RETURNING id""",
+                (meet_id, stroke, distance, gender)
+            )
+            lx_event_id = cur.fetchone()[0]
+
+            # Discover CategoryIds from summary page (tabs) and program page (ALL, D1, D2, etc.)
+            category_ids = set()
+            summary_base = f"{BASE_URL}/event/summary?OnlineEventId={onlineeventid}&SessionId={session_id}&EventId={event_id}"
+            try:
+                r_sum = requests.get(summary_base, timeout=30)
+                if not r_sum.ok:
+                    print(f"[SCRAPE] ERROR: summary {r_sum.status_code} for event {event_id}, skipping", flush=True)
+                    continue
+            except Exception as e:
+                print(f"[SCRAPE] ERROR: summary fetch failed for event {event_id}: {e}", flush=True)
+                continue
+            soup_sum = BeautifulSoup(r_sum.text, 'html.parser')
+            for a in soup_sum.find_all('a', href=True):
+                href = a['href'].replace('&amp;', '&')
+                if 'event/summary' in href and f'EventId={event_id}' in href:
+                    qs = parse_qs(urlparse(href).query)
+                    cid = qs.get('CategoryId', [None])[0]
+                    if cid is not None and str(cid).isdigit():
+                        category_ids.add(int(cid))
+            for a in soup.find_all('a', href=True):  # program page
+                href = a['href'].replace('&amp;', '&')
+                if 'event/summary' in href and f'EventId={event_id}' in href:
+                    qs = parse_qs(urlparse(href).query)
+                    cid = qs.get('CategoryId', [None])[0]
+                    if cid is not None and str(cid).isdigit():
+                        category_ids.add(int(cid))
+            # Only fetch explicit CategoryIds when multiple categories exist (2+)
+            # Single-category events: default view is sufficient, extra fetch would duplicate
+            if len(category_ids) >= 2:
+                for cid in range(min(category_ids), max(category_ids) + 1):
+                    category_ids.add(cid)
+
+            # Always include categoryless URL (initial response); add explicit category URLs when 2+
+            fetch_for_category = {None: soup_sum}
+            for cid in (sorted(category_ids) if len(category_ids) >= 2 else []):
+                summary_url = f"{summary_base}&CategoryId={cid}"
+                print(f"[SCRAPE] GET {summary_url} (category {cid})", flush=True)
+                try:
+                    r_cat = requests.get(summary_url, timeout=30)
+                    if not r_cat.ok:
+                        print(f"[SCRAPE] ERROR: category {cid} {r_cat.status_code}, skipping", flush=True)
+                        continue
+                except Exception as e:
+                    print(f"[SCRAPE] ERROR: category {cid} fetch failed: {e}", flush=True)
+                    continue
+                fetch_for_category[cid] = BeautifulSoup(r_cat.text, 'html.parser')
+
+            result_count_total = 0
+            rows_count_total = 0
+            seen_heat_athlete = set()  # (lx_event_id, heatnumber, umk) to avoid duplicates
+
+            cats_display = ['default'] + sorted(c for c in fetch_for_category if c is not None)
+            print(f"[SCRAPE] {summary_base} ({event_title}) categories={cats_display}", flush=True)
+
+            for category_id in sorted(fetch_for_category, key=lambda x: (x is not None, x or 0)):
+                soup_cat = fetch_for_category[category_id]
+
+                for table in soup_cat.find_all('table'):
+                    headers = [th.get_text(strip=True).upper()[:20] for th in table.find_all('th')]
+                    if not any('RK' in h or 'HELY' in h for h in headers):
+                        continue
+                    if not any('NAME' in h or 'NEV' in h for h in headers):
+                        continue
+                    if not any('TIME' in h or 'IDŐ' in h for h in headers):
+                        continue
+
+                    col_idx = {}
+                    for i, h in enumerate(headers):
+                        if 'RK' in h or 'HELY' in h:
+                            col_idx['rk'] = i
+                        elif 'NAME' in h or 'NEV' in h:
+                            col_idx['name'] = i
+                        elif 'TIME' in h or 'IDŐ' in h:
+                            col_idx['time'] = i
+                    rk_idx = col_idx.get('rk', 0)
+                    name_idx = col_idx.get('name', 1)
+                    time_idx = col_idx.get('time', 3)
+
+                    rows = table.find_all('tr')[1:]
+                    rows_count_total += len(rows)
+                    print(f"[SCRAPE]   -> summary table: {len(rows)} rows (cat {category_id or 'default'})", flush=True)
+
+                    for tr in rows:
+                        tds = tr.find_all('td')
+                        if len(tds) <= max(rk_idx, name_idx, time_idx):
+                            continue
+                        rank_s = tds[rk_idx].get_text(strip=True).replace('*', '').strip()
+                        rank = int(rank_s) if rank_s and rank_s.isdigit() else None  # non-ranked: use NULL
+                        time_raw = tds[time_idx].get_text(strip=True).replace('*', '').strip()
+                        # Extract time (M:SS.hh) - may be concatenated with percentage e.g. "00:29.8798.298%"
+                        time_match = re.search(r'\d{1,2}:\d{2}\.\d{2}', time_raw)
+                        time_s = time_match.group(0) if time_match else (time_raw.split()[0] if time_raw else '')
+                        time_hund = _parse_swimtime(time_s) if time_s else None
+                        # Parse status for DNS, DSQ, DQ, etc.
+                        status = None
+                        raw_upper = time_raw.upper()
+                        for st in ('DNS', 'DSQ', 'DQ', 'DNF', 'SCR', 'NT'):
+                            if st in raw_upper:
+                                status = st
+                                break
+
+                        name_cell = tds[name_idx]
+                        a_tag = name_cell.find('a', href=True)
+                        if not a_tag:
+                            continue
+                        umk, firstname, lastname, club_name, birth_year = _parse_athlete_from_link(a_tag)
+                        if umk is None:
+                            continue
+
+                        # Get heatnumber and lane from H/L column (link HeatId= or plain text "3/4" = heat 3, lane 4)
+                        heatnumber = 0  # 0 = not found, use 1 as default
+                        lane = None
+                        for cell in tds:
+                            for a in cell.find_all('a', href=True):
+                                href = a['href'].replace('&amp;', '&')
+                                if ('event/result' in href or 'event/startlist' in href) and 'HeatId=' in href:
+                                    qs = parse_qs(urlparse(href).query)
+                                    hid = qs.get('HeatId', [None])[0]
+                                    if hid and str(hid).isdigit() and int(hid) > 0:
+                                        heatnumber = int(hid)
+                                    # Parse H/L from link text e.g. "3/4" or "[3/4]" -> lane = 4
+                                    hl_text = a.get_text(strip=True).strip('[]')
+                                    hl_match = re.match(r'(\d+)/(\d+)', hl_text)
+                                    if hl_match:
+                                        lane = int(hl_match.group(2))
+                                    break
+                            if heatnumber > 0:
+                                break
+                        # Fallback: parse heat/lane from plain text "X/Y" in any cell
+                        if heatnumber == 0:
+                            for cell in tds:
+                                text = cell.get_text(strip=True).strip('[]')
+                                hl_match = re.search(r'(\d+)/(\d+)', text)
+                                if hl_match:
+                                    heatnumber = int(hl_match.group(1))
+                                    lane = int(hl_match.group(2))
+                                    break
+                        if heatnumber == 0:
+                            heatnumber = 1  # default for combined/unknown results
+
+                        if (lx_event_id, heatnumber, umk) in seen_heat_athlete:
+                            continue
+                        if time_hund is None and status is None:
+                            row_cells = [td.get_text(strip=True)[:50] for td in tds[:8]]
+                            print(
+                                f"[SCRAPE] SKIP: both timehundredths and status missing. "
+                                f"rank={rank_s!r} name={firstname} {lastname} umk={umk} time_raw={time_raw!r} cells={row_cells}",
+                                flush=True
+                            )
+                            continue
+                        seen_heat_athlete.add((lx_event_id, heatnumber, umk))
+
+                        # Upsert club
+                        club_code = (club_name or '')[:32] or 'UNK'
+                        cur.execute("SELECT id FROM lx_club WHERE lenexclubcode = %s", (club_code,))
+                        row = cur.fetchone()
+                        if row:
+                            club_id = row[0]
+                        else:
+                            cur.execute(
+                                "INSERT INTO lx_club(lenexclubcode, name, nation) VALUES (%s,%s,'HUN') RETURNING id",
+                                (club_code, club_name or club_code)
+                            )
+                            club_id = cur.fetchone()[0]
+
+                        # Athlete: skip swimmer fetch if already in DB
+                        cur.execute("SELECT 1 FROM lx_athlete WHERE id = %s", (umk,))
+                        if cur.fetchone():
+                            pass
+                        else:
+                            if birth_year is None:
+                                birth_year = _fetch_swimmer_birthyear(onlineeventid, umk)
+                            birthdate = date(birth_year, 1, 1) if birth_year else None
+                            cur.execute(
+                                """INSERT INTO lx_athlete(id, firstname, lastname, birthdate, gender)
+                                   VALUES (%s,%s,%s,%s,'X')
+                                   ON CONFLICT (id) DO UPDATE SET
+                                     firstname=COALESCE(EXCLUDED.firstname,lx_athlete.firstname),
+                                     lastname=COALESCE(EXCLUDED.lastname,lx_athlete.lastname),
+                                     birthdate=COALESCE(EXCLUDED.birthdate,lx_athlete.birthdate)""",
+                                (umk, firstname, lastname, birthdate)
+                            )
+
+                        cur.execute(
+                            """INSERT INTO lx_result(athleteid, eventid, heatnumber, clubid, lane, timehundredths, status, rank)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (umk, lx_event_id, heatnumber, club_id, lane, time_hund, status, rank)
+                        )
+                        result_count_total += 1
+                    break  # one result table per category page
+
+            heats_count = len({(e, h) for e, h, _ in seen_heat_athlete})
+            dup_note = f" ({rows_count_total - result_count_total} duplicate rows skipped)" if rows_count_total > result_count_total else ""
+            print(f"[SCRAPE]   -> {heats_count} heat(s), {result_count_total} result(s){dup_note}", flush=True)
+            conn.commit()
+
+    except Exception as e:
+        print(f"[SCRAPE] ERROR: {e}", flush=True)
+        traceback.print_exc()
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _get_events_without_lenex(conn) -> list[tuple[int, str]]:
@@ -452,42 +517,22 @@ if __name__ == '__main__':
             print("[INFO] No events with missing LENEX found in DB", flush=True)
         else:
             print(f"[INFO] Found {len(events)} events with missing LENEX", flush=True)
-            failed = 0
             for oid, name in events:
                 name = name or oid
                 print(f"[EVENT] Scraping {name} ({oid})...", flush=True)
+                scrape_and_import(oid)
                 try:
-                    if scrape_and_import(oid):
-                        cur = conn.cursor()
-                        cur.execute(
-                            "UPDATE importedlenexfile SET status='scraped' WHERE onlineeventid=%s",
-                            (oid,)
-                        )
-                        conn.commit()
-                        print(f"[OK] Scraped {name} ({oid})", flush=True)
-                        break  # TEST: stop after first successful scrape
-                    else:
-                        failed += 1
-                        cur = conn.cursor()
-                        cur.execute(
-                            "UPDATE importedlenexfile SET status='scrape_failed' WHERE onlineeventid=%s",
-                            (oid,)
-                        )
-                        conn.commit()
-                        print(f"[ERROR] Scrape failed for {oid}", flush=True)
-                except Exception as e:
-                    failed += 1
                     cur = conn.cursor()
                     cur.execute(
-                        "UPDATE importedlenexfile SET status='scrape_failed' WHERE onlineeventid=%s",
+                        "UPDATE importedlenexfile SET status='scraped' WHERE onlineeventid=%s",
                         (oid,)
                     )
                     conn.commit()
-                    print(f"[ERROR] Scrape failed for {oid}: {e}", flush=True)
+                    print(f"[OK] Scraped {name} ({oid})", flush=True)
+                except Exception as e:
+                    print(f"[EVENT] ERROR updating status for {oid}: {e}", flush=True)
                     traceback.print_exc()
             conn.close()
-            if failed:
-                sys.exit(1)
     except Exception as e:
         print(f"[ERROR] {e}", flush=True)
         sys.exit(1)

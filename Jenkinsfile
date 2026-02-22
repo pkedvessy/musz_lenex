@@ -18,7 +18,6 @@ pipeline {
         }
 
         stage('Flyway Migrate') {
-            when { expression { return false } }  // TEMP: disabled for scraping-only run
             steps {
 
                 withCredentials([usernamePassword(
@@ -42,7 +41,6 @@ pipeline {
         }
 
         stage('Fetch LENEX') {
-            when { expression { return false } }  // TEMP: disabled for scraping-only run
             steps {
                 withCredentials([usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD')]) {
                     sh """
@@ -60,7 +58,6 @@ pipeline {
         }
 
         stage('Backup LENEX to Google Drive') {
-            when { expression { return false } }  // TEMP: disabled for scraping-only run
             steps {
                 withCredentials([
                     usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD'),
@@ -83,7 +80,6 @@ pipeline {
         }
 
         stage('Import LENEX') {
-            when { expression { return false } }  // TEMP: disabled for scraping-only run
             steps {
                 withCredentials([usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD')]) {
                     sh """
