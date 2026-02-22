@@ -465,6 +465,7 @@ if __name__ == '__main__':
                         )
                         conn.commit()
                         print(f"[OK] Scraped {name} ({oid})", flush=True)
+                        break  # TEST: stop after first successful scrape
                     else:
                         failed += 1
                         cur = conn.cursor()
