@@ -19,6 +19,7 @@ pipeline {
         }
 
         stage('Flyway Migrate') {
+            when { expression { return false } }
             steps {
 
                 withCredentials([usernamePassword(
@@ -42,6 +43,7 @@ pipeline {
         }
 
         stage('Fetch LENEX') {
+            when { expression { return false } }
             steps {
                 withCredentials([usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD')]) {
                     sh """
@@ -59,6 +61,7 @@ pipeline {
         }
 
         stage('Backup LENEX to Google Drive') {
+            when { expression { return false } }
             steps {
                 withCredentials([
                     usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD'),
@@ -81,6 +84,7 @@ pipeline {
         }
 
         stage('Import LENEX') {
+            when { expression { return false } }
             steps {
                 withCredentials([usernamePassword(credentialsId: 'postgres-lenex-db', usernameVariable: 'DB_USER', passwordVariable: 'DB_PASSWORD')]) {
                     sh """
@@ -108,7 +112,7 @@ pipeline {
                         -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
                         -e DB_PASSWORD=$DB_PASSWORD \
                         python:3.12-slim \
-                        bash -c "pip install psycopg2-binary requests beautifulsoup4 && python -u /scripts/scrape_musz_result_pages.py"
+                        bash -c "pip install psycopg2-binary requests beautifulsoup4 && python -u /scripts/scrape_musz_result_pages.py --online-event-id 185829537"
                     """
                 }
             }
