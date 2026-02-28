@@ -33,6 +33,7 @@ DB_PORT = os.environ.get('DB_PORT', '5432')
 DB_NAME = os.environ['DB_NAME']
 DB_USER = os.environ['DB_USER']
 DB_PASSWORD = os.environ['DB_PASSWORD']
+DEFAULT_CLUB_NATION = os.environ.get('DEFAULT_CLUB_NATION', 'HUN')
 
 STROKE_MAP = {
     'pillangó': 'FLY', 'hát': 'BACK', 'mell': 'BREAST', 'gyors': 'FREE',
@@ -475,8 +476,8 @@ def scrape_and_import(onlineeventid: int) -> None:
                             club_id = row[0]
                         else:
                             cur.execute(
-                                "INSERT INTO lx_club(lenexclubcode, name, nation) VALUES (%s,%s,'HUN') RETURNING id",
-                                (club_code, club_name or club_code)
+                                "INSERT INTO lx_club(lenexclubcode, name, nation) VALUES (%s,%s,%s) RETURNING id",
+                                (club_code, club_name or club_code, DEFAULT_CLUB_NATION)
                             )
                             club_id = cur.fetchone()[0]
 
