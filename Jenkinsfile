@@ -107,7 +107,7 @@ pipeline {
                         -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
                         -e DB_PASSWORD=$DB_PASSWORD \
                         python:3.12-slim \
-                        bash -c "pip install psycopg2-binary requests beautifulsoup4 && python -u /scripts/scrape_musz_results.py"
+                        bash -c "pip install psycopg2-binary requests beautifulsoup4 && python -u /scripts/scrape_musz_result_pages.py"
                     """
                 }
             }
