@@ -158,6 +158,20 @@ def _parse_splits_from_row(row_html) -> list[tuple[int, int]]:
     return splits
 
 
+def _parse_splits_from_splittimes_div(splittimes_div) -> list[tuple[int, int]]:
+    """Parse splits from MUSZ splittimes structure: div.col-3 with span(distance) + span strong(time)."""
+    splits = []
+    for col in splittimes_div.find_all('div', class_=lambda c: c and 'col-3' in str(c)):
+        text = col.get_text()
+        m = re.search(r'(\d+)\s*m\s*(\d{1,2}):(\d{2})\.(\d{2})', text)
+        if m:
+            dist = int(m.group(1))
+            mins, sec, hund = int(m.group(2)), int(m.group(3)), int(m.group(4))
+            th = mins * 6000 + sec * 100 + hund
+            splits.append((dist, th))
+    return splits
+
+
 class _DryRunCursor:
     """No-op cursor for dry run: logs executes, returns fake ids for fetchone after INSERT."""
 
@@ -520,7 +534,14 @@ def scrape_and_import(onlineeventid: int, dry_run: bool = False) -> None:
                             result_id = cur.fetchone()[0]
                             result_count_total += 1
 
-                            splits = _parse_splits_from_row(tr)
+                            splits = []
+                            next_tr = tr.find_next_sibling('tr')
+                            if next_tr:
+                                splittimes_div = next_tr.find('div', class_=lambda c: c and 'splittimes' in str(c))
+                                if splittimes_div:
+                                    splits = _parse_splits_from_splittimes_div(splittimes_div)
+                            if not splits:
+                                splits = _parse_splits_from_row(tr)
                             for dist, th in splits:
                                 cur.execute(
                                     "INSERT INTO lx_split(resultid, distance, timehundredths) VALUES (%s,%s,%s)",
