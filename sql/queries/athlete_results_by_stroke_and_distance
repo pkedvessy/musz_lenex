@@ -1,0 +1,11 @@
+SELECT a.lastname || ' ' || a.firstname as name, 
+       m.startdate, 
+       LPAD(r.timehundredths / 100 / 60 / 60 || '', 2, '0') || ':' || LPAD(r.timehundredths / 100 / 60 || '', 2, '0')  || ':' ||  LPAD(r.timehundredths / 100 % 60 || '', 2, '0') || '.' || LPAD(r.timehundredths % 100 || '', 2, '0') as time
+FROM lx_result r
+JOIN lx_event e ON r.eventid = e.id
+JOIN lx_meet m ON e.meetid = m.ID
+JOIN lx_athlete a ON r.athleteid = a.ID
+WHERE r.athleteid in (34910)
+AND e.stroke = 'BACK' 
+AND e.distance = 100
+ORDER BY r.timehundredths
