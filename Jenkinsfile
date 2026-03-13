@@ -6,9 +6,16 @@ pipeline {
         DB_PORT = "5432"
         DB_NAME = "lenex"
         DB_SCHEMA = "public"
+        IMAGE = "musz-lenex"
     }
 
     stages {
+
+        stage('Build image') {
+            steps {
+                sh "docker build -t ${IMAGE} ."
+            }
+        }
 
         stage('Checkout') {
             when { expression { return false } }
@@ -51,8 +58,8 @@ pipeline {
                         -e DB_HOST=${DB_HOST} -e DB_PORT=${DB_PORT} \
                         -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
                         -e DB_PASSWORD=$DB_PASSWORD \
-                        python:3.12-slim \
-                        bash -c "pip install psycopg2-binary requests beautifulsoup4 && python -u /scripts/fetch_lenex.py"
+                        ${IMAGE} \
+                        python -u /scripts/fetch_lenex.py
                     """
                 }
             }
@@ -73,8 +80,8 @@ pipeline {
                         -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
                         -e DB_PASSWORD=$DB_PASSWORD \
                         -e GDRIVE_FOLDER_ID=YOUR_FOLDER_ID \
-                        python:3.12-slim \
-                        bash -c "pip install psycopg2-binary google-api-python-client google-auth-httplib2 google-auth-oauthlib && python -u /scripts/backup_to_gdrive.py"
+                        ${IMAGE} \
+                        python -u /scripts/backup_to_gdrive.py
                     """
                 }
             }
@@ -91,8 +98,8 @@ pipeline {
                         -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
                         -e DB_PASSWORD=$DB_PASSWORD \
                         -e LENEX_DIR=/lenex_files \
-                        python:3.12-slim \
-                        bash -c "pip install psycopg2-binary && python -u /scripts/import_lenex.py"
+                        ${IMAGE} \
+                        python -u /scripts/import_lenex.py
                     """
                 }
             }
@@ -107,8 +114,8 @@ pipeline {
                         -e DB_HOST=${DB_HOST} -e DB_PORT=${DB_PORT} \
                         -e DB_NAME=${DB_NAME} -e DB_USER=$DB_USER \
                         -e DB_PASSWORD=$DB_PASSWORD \
-                        python:3.12-slim \
-                        bash -c "pip install psycopg2-binary requests beautifulsoup4 && python -u /scripts/scrape_musz_result_pages.py"
+                        ${IMAGE} \
+                        python -u /scripts/scrape_musz_result_pages.py
                     """
                 }
             }
