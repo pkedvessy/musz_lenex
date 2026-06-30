@@ -15,7 +15,7 @@ DB_USER = os.environ['DB_USER']
 DB_PASSWORD = os.environ['DB_PASSWORD']
 FOLDER_ID = '15XguFYYvif-iu9sLwKUcTgbetOgFRB2o'
 
-DOWNLOAD_DIR = 'lenex_files'
+DOWNLOAD_DIR = os.environ.get('LENEX_DIR', 'lenex_files')
 
 print("[INIT] Starting Google Drive backup...", flush=True)
 

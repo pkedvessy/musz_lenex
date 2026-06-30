@@ -17,7 +17,7 @@ DB_PASSWORD = os.environ['DB_PASSWORD']
 
 BASE_URL = 'https://live.musz.hu'
 
-DOWNLOAD_DIR = 'lenex_files'
+DOWNLOAD_DIR = os.environ.get('LENEX_DIR', 'lenex_files')
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 def get_lenex_file_url(event_page_html, event_id):
